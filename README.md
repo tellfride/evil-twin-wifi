@@ -5,12 +5,12 @@ Com que frequência você presta atenção ao nome do seu ponto de acesso Wi-Fi?
 
 Ao conectar no SSID WIFI GRATIS o dispositivo é redirecionado para um portal que solicita usuário e senha.
 Bibliotecas necessárias:
-<WiFi.h>
-<WebServer.h>
-<DNSServer.h>
-<Wire.h>
-<Adafruit_GFX.h>
-<Adafruit_SSD1306.h>
+WiFi.h
+WebServer.h
+DNSServer.h
+Wire.h
+Adafruit_GFX.h
+Adafruit_SSD1306.h
 
 ESP-32 + modulo oled 0,96 (Protoboard opicional)
 ESP32 - OLED 0.96
